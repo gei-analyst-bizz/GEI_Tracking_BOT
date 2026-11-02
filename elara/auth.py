@@ -2,7 +2,7 @@ from __future__ import annotations
 import logging
 from db import supabase
 from whatsapp.ux import clean_phone_number
-from elara.config import DEVELOPER_PHONE, KANAV_PHONE
+from elara.config import DEVELOPER_PHONE, KANAV_PHONE, KANAV_PHONES
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ def resolve_elara_user(whatsapp_number: str) -> dict | None:
                 return user
             return {"id": "elara-dev-01", "name": "Developer", "role": "Developer", "phone": clean_num, "department": "Project Administration", "is_elara_user": True}
 
-        elif clean_num == KANAV_PHONE:
+        elif clean_num in KANAV_PHONES or clean_num == KANAV_PHONE:
             res = supabase.table("elara_users").select("*").eq("name", "Kanav").execute()
             if res.data and isinstance(res.data, list) and isinstance(res.data[0], dict):
                 user = dict(res.data[0])

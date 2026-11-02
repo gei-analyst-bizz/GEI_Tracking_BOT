@@ -789,7 +789,9 @@ def _handle_text(sender: str, text: str, voice_note: bool = False):
         from facilities.flows.router import is_facilities_user, get_session, route_facilities_message
         session = get_session(sender)
         if is_facilities_user(sender) or (session and session.get("current_flow_state")):
-            route_facilities_message(sender, text=text)
+            from facilities.auth import resolve_facilities_user
+            fac_u = resolve_facilities_user(sender)
+            route_facilities_message(sender, text=text, user=fac_u)
             return
     except Exception as fac_err:
         logger.error(f"Facilities routing error in _handle_text: {fac_err}", exc_info=True)

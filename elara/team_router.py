@@ -5,7 +5,7 @@ import re
 import threading
 from whatsapp.ux import clean_phone_number, send_interactive_buttons, send_text
 from elara.auth import resolve_elara_user, is_elara_user, is_elara_admin
-from elara.config import ELARA_DEPARTMENTS, DEVELOPER_PHONE, KANAV_PHONE
+from elara.config import ELARA_DEPARTMENTS, DEVELOPER_PHONE, KANAV_PHONE, KANAV_PHONES
 from facilities.auth import resolve_facilities_user
 from facilities.config import BUILDING_TABS, BUILDING_ALIASES
 
@@ -81,7 +81,7 @@ def pop_pending_action(sender: str) -> str | None:
 def is_dual_access_user(whatsapp_number: str) -> bool:
     """Check if user has access to BOTH Facilities and Elara Home (Kanav / Developer)."""
     clean_num = clean_phone_number(whatsapp_number)
-    if clean_num in (KANAV_PHONE, DEVELOPER_PHONE):
+    if clean_num in KANAV_PHONES or clean_num in (KANAV_PHONE, DEVELOPER_PHONE):
         return True
 
     # Check if registered in both systems
@@ -366,7 +366,30 @@ def route_incoming_message(sender: str, text: str | None = None, button_id: str 
             show_home(sender, fac_user or {"name": "Kanav", "role": "Director"})
             return True
 
-        # 3. Check if user is in an active in-flight multi-step flow
+        # 3. Check if text clearly indicates a specific team
+        detected_team = detect_team_intent_from_text(msg_text)
+        if detected_team == "elara":
+            set_active_team(clean_num, "elara")
+            from facilities.flows.router import clear_session as clear_fac_session
+            clear_fac_session(clean_num)
+            from elara.flows.router import route_elara_message
+            route_elara_message(sender, text=text, button_id=button_id, user=elara_user, voice_transcript=voice_transcript)
+            return True
+        elif detected_team == "facilities":
+            set_active_team(clean_num, "facilities")
+            from elara.session import clear_elara_session
+            clear_elara_session(clean_num)
+            from facilities.flows.router import route_facilities_message
+            route_facilities_message(
+                sender,
+                text=text,
+                button_id=button_id,
+                user=fac_user,
+                voice_transcript=voice_transcript,
+            )
+            return True
+
+        # 4. Check if user is in an active in-flight multi-step flow (when no explicit team mentioned)
         from elara.session import get_elara_session
         from facilities.flows.router import get_session as get_fac_session
 
@@ -382,19 +405,6 @@ def route_incoming_message(sender: str, text: str | None = None, button_id: str 
             route_facilities_message(sender, text=text or "", button_id=button_id or "", user=fac_user or {}, voice_transcript=voice_transcript or "")
             return True
 
-        # 4. Check if text clearly indicates a specific team
-        detected_team = detect_team_intent_from_text(msg_text)
-        if detected_team == "elara":
-            set_active_team(clean_num, "elara")
-            from elara.flows.router import route_elara_message
-            route_elara_message(sender, text=text, button_id=button_id, user=elara_user, voice_transcript=voice_transcript)
-            return True
-        elif detected_team == "facilities":
-            set_active_team(clean_num, "facilities")
-            from facilities.flows.router import route_facilities_message
-            route_facilities_message(sender, text=text or "", button_id=button_id or "", user=fac_user or {}, voice_transcript=voice_transcript or "")
-            return True
-
         # 5. Check if active locked team context exists from recent operation
         active_team = get_active_team(clean_num)
         if active_team == "elara":
@@ -403,7 +413,13 @@ def route_incoming_message(sender: str, text: str | None = None, button_id: str 
             return True
         elif active_team == "facilities":
             from facilities.flows.router import route_facilities_message
-            route_facilities_message(sender, text=text or "", button_id=button_id or "", user=fac_user or {}, voice_transcript=voice_transcript or "")
+            route_facilities_message(
+                sender,
+                text=text,
+                button_id=button_id,
+                user=fac_user,
+                voice_transcript=voice_transcript,
+            )
             return True
         elif active_team == "factech":
             return False
@@ -424,7 +440,13 @@ def route_incoming_message(sender: str, text: str | None = None, button_id: str 
     # Priority 3: FACILITIES-ONLY USER (e.g. Anoop, Kuldeep, Vikash)
     if fac_user and fac_user.get("is_facilities_user") and not elara_user:
         from facilities.flows.router import route_facilities_message
-        route_facilities_message(sender, text=text or "", button_id=button_id or "", user=fac_user or {}, voice_transcript=voice_transcript or "")
+        route_facilities_message(
+            sender,
+            text=text,
+            button_id=button_id,
+            user=fac_user,
+            voice_transcript=voice_transcript,
+        )
         return True
 
     # User is not a recognized team member of either team (guest)

@@ -22,6 +22,7 @@ from facilities.config import (
     GROQCLOUD_API_KEY,
     LLM_PROVIDER,
     FACILITIES_GROQ_MODEL,
+    FACILITIES_GROQ_FALLBACK_MODELS,
     FACILITIES_GEMINI_MODEL,
     VALID_TASK_TYPES,
     VALID_STATUSES,
@@ -186,7 +187,7 @@ def _call_gemini(system_prompt: str, user_message: str, json_output: bool = True
 
 
 def _call_groq(system_prompt: str, user_message: str, json_output: bool = True) -> str:
-    """Execute API request against Groq."""
+    """Execute API request against Groq with automatic model fallback."""
     if not GROQCLOUD_API_KEY:
         raise RuntimeError("GROQCLOUD_API_KEY is not configured")
 
@@ -195,21 +196,32 @@ def _call_groq(system_prompt: str, user_message: str, json_output: bool = True) 
         "Authorization": f"Bearer {GROQCLOUD_API_KEY}",
         "Content-Type": "application/json"
     }
-    payload = {
-        "model": FACILITIES_GROQ_MODEL,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}
-        ],
-        "temperature": 0
-    }
-    if json_output:
-        payload["response_format"] = {"type": "json_object"}
 
-    r = requests.post(url, headers=headers, json=payload, timeout=8)
-    r.raise_for_status()
-    data = r.json()
-    return data['choices'][0]['message']['content']
+    models_to_try = [FACILITIES_GROQ_MODEL] + [m for m in FACILITIES_GROQ_FALLBACK_MODELS if m != FACILITIES_GROQ_MODEL]
+    last_err = None
+
+    for model_name in models_to_try:
+        try:
+            payload = {
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ],
+                "temperature": 0
+            }
+            if json_output:
+                payload["response_format"] = {"type": "json_object"}
+
+            r = requests.post(url, headers=headers, json=payload, timeout=8)
+            r.raise_for_status()
+            data = r.json()
+            return data['choices'][0]['message']['content']
+        except Exception as e:
+            logger.warning(f"Groq model '{model_name}' failed: {e}")
+            last_err = e
+
+    raise last_err or RuntimeError("All Groq models failed")
 
 
 def _call_llm(system_prompt: str, user_message: str, json_output: bool = True) -> str:
@@ -329,9 +341,17 @@ Return JSON:
         content = _call_llm(FACILITIES_SYSTEM_PROMPT, voice_prompt, json_output=True)
         result = _parse_json_response(content)
 
-        if result and "operations" in result:
-            result["raw_transcript"] = transcript
-            return result
+        if result:
+            # Map intents to operations if LLM returned standard intents array
+            if "operations" not in result and "intents" in result:
+                result["operations"] = result["intents"]
+                result["transcription_confidence"] = max(
+                    [op.get("confidence", 0.85) for op in result["operations"]], default=0.85
+                )
+
+            if "operations" in result and result["operations"]:
+                result["raw_transcript"] = transcript
+                return result
 
         return {
             "operations": [],

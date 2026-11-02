@@ -51,4 +51,15 @@ VALID_PRIORITIES = ["low", "medium", "high"]
 # Key phone numbers
 DEVELOPER_PHONE = "917717754421"
 KANAV_PHONE = "919811867829"
+KANAV_PHONES = (KANAV_PHONE,)
 RACHIT_PHONE = "919867272041"
+
+def is_kanav_phone(phone: str) -> bool:
+    if not phone:
+        return False
+    # pyrefly: ignore[unnecessary-type-conversion]
+    digits = "".join(c for c in str(phone) if c.isdigit())
+    if len(digits) == 10:
+        digits = "91" + digits
+    return digits == KANAV_PHONE
+

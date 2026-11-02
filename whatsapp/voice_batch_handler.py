@@ -116,33 +116,41 @@ def extract_batch_updates(transcript: str) -> Optional[List[dict]]:
             "Authorization": f"Bearer {GROQCLOUD_API_KEY}",
             "Content-Type": "application/json"
         }
-        payload = {
-            "model": "llama-3.1-8b-instant",
-            "messages": [
-                {"role": "system", "content": BATCH_EXTRACT_PROMPT},
-                {"role": "user", "content": f'Transcript: "{transcript}"'}
-            ],
-            "response_format": {"type": "json_object"},
-            "temperature": 0
-        }
+        models_to_try = [
+            os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+            "openai/gpt-oss-20b",
+            "qwen/qwen3.8-27b",
+            "llama-3.1-8b-instant"
+        ]
+        last_err = None
+        for model_name in models_to_try:
+            try:
+                payload = {
+                    "model": model_name,
+                    "messages": [
+                        {"role": "system", "content": BATCH_EXTRACT_PROMPT},
+                        {"role": "user", "content": f'Transcript: "{transcript}"'}
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0
+                }
 
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        content = data['choices'][0]['message']['content']
-        
-        result = json.loads(content)
-
-        # Handle both {"updates": [...]} and direct [...] formats
-        if isinstance(result, dict):
-            result = result.get("updates") or result.get("data") or list(result.values())[0]
-        
-        if not isinstance(result, list):
-            logger.warning(f"Batch extract returned non-list: {type(result)}")
-            return None
-
-        if len(result) < 1:
-            return None
+                response = requests.post(url, headers=headers, json=payload, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+                content = data['choices'][0]['message']['content']
+                result = json.loads(content)
+                if isinstance(result, dict):
+                    result = result.get("updates") or result.get("data") or list(result.values())[0]
+                if not isinstance(result, list) or len(result) < 1:
+                    return None
+                return result
+            except Exception as e:
+                logger.warning(f"Groq model '{model_name}' failed in batch handler: {e}")
+                last_err = e
+        if last_err:
+            raise last_err
+        return None
 
         # Validate each update has required fields
         validated = []

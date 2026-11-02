@@ -20,7 +20,10 @@ import json
 from datetime import datetime, timezone
 
 from db import supabase
-from facilities.auth import resolve_facilities_user
+from whatsapp.ux import clean_phone_number
+from elara.config import KANAV_PHONE, DEVELOPER_PHONE, KANAV_PHONES
+from facilities.config import BUILDING_TABS
+from facilities.auth import resolve_facilities_user, is_all_buildings_user
 
 logger = logging.getLogger(__name__)
 
@@ -101,17 +104,39 @@ def route_facilities_message(sender: str, text: str | None = None,
         image_data: Image attachment data (if any)
         voice_transcript: Transcribed voice note text (if any)
     """
-    # Always resolve through Facilities auth to get is_facilities_user flag.
-    # The `user` dict from auth middleware doesn't include this field.
-    fac_user = resolve_facilities_user(sender)
-    if not fac_user and user and (
-        user.get("role") in ("Director", "Developer")
-        or user.get("department") == "Facilities"
-        or bool(user.get("permitted_buildings"))
-        or user.get("is_facilities_user")
-    ):
-        fac_user = dict(user)
-        fac_user["is_facilities_user"] = True
+    clean_sender = clean_phone_number(sender)
+    fac_user = resolve_facilities_user(clean_sender or sender)
+
+    is_admin = (
+        clean_sender in KANAV_PHONES
+        or clean_sender in (KANAV_PHONE, DEVELOPER_PHONE)
+        or (user and (
+            str(user.get("name", "")).strip().lower() in ("kanav", "developer", "anoop", "abhijeet")
+            or str(user.get("role", "")).strip().lower() in ("director", "developer", "facility head", "facilities head")
+        ))
+    )
+
+    if not fac_user or not fac_user.get("is_facilities_user"):
+        if is_admin:
+            fac_user = dict(user) if user else {
+                "name": "Kanav",
+                "role": "Director",
+                "department": "Facilities",
+                "whatsapp_number": clean_sender,
+            }
+            fac_user["is_facilities_user"] = True
+            fac_user["permitted_buildings"] = BUILDING_TABS.copy()
+        elif user and (
+            str(user.get("role", "")).strip().lower() in ("director", "developer", "facility head", "facilities head")
+            or str(user.get("department", "")).strip().lower() == "facilities"
+            or bool(user.get("permitted_buildings"))
+            or user.get("is_facilities_user")
+            or is_all_buildings_user(user)
+        ):
+            fac_user = dict(user)
+            fac_user["is_facilities_user"] = True
+            if not fac_user.get("permitted_buildings"):
+                fac_user["permitted_buildings"] = BUILDING_TABS.copy()
 
     if not fac_user or not fac_user.get("is_facilities_user"):
         # Not a Facilities user — shouldn't reach here, but handle gracefully
@@ -909,5 +934,8 @@ def is_facilities_user(whatsapp_number: str) -> bool:
     Quick check if a WhatsApp number belongs to a Facilities user.
     Used by the main webhook to decide whether to route to this module.
     """
-    user = resolve_facilities_user(whatsapp_number)
+    clean_num = clean_phone_number(whatsapp_number)
+    if clean_num in KANAV_PHONES or clean_num in (KANAV_PHONE, DEVELOPER_PHONE):
+        return True
+    user = resolve_facilities_user(clean_num or whatsapp_number)
     return user is not None and user.get("is_facilities_user", False)

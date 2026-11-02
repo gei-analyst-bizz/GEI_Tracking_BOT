@@ -1,3 +1,4 @@
+import os
 import logging
 import json
 import requests
@@ -111,7 +112,7 @@ OUTPUT FORMAT:
 }
 """
 
-def parse_with_llm(message: str, history: List[Dict] = None, state: Dict = None):
+def parse_with_llm(message: str, history: Optional[List[Dict]] = None, state: Optional[Dict] = None):
     # Construct context string
     context_str = ""
     if history:
@@ -151,20 +152,32 @@ def _call_groq(message, system_prompt):
         "Authorization": f"Bearer {GROQCLOUD_API_KEY}",
         "Content-Type": "application/json"
     }
-    payload = {
-        "model": "llama-3.1-8b-instant", # Default Groq model
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": message}
-        ],
-        "response_format": {"type": "json_object"},
-        "temperature": 0
-    }
-    
-    response = requests.post(url, headers=headers, json=payload, timeout=10)
-    response.raise_for_status()
-    data = response.json()
-    return json.loads(data['choices'][0]['message']['content'])
+    models_to_try = [
+        os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
+        "openai/gpt-oss-20b",
+        "qwen/qwen3.8-27b",
+        "llama-3.1-8b-instant"
+    ]
+    last_err = None
+    for model_name in models_to_try:
+        try:
+            payload = {
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": message}
+                ],
+                "response_format": {"type": "json_object"},
+                "temperature": 0
+            }
+            response = requests.post(url, headers=headers, json=payload, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            return json.loads(data['choices'][0]['message']['content'])
+        except Exception as e:
+            logger.warning(f"Groq model '{model_name}' failed in core llm_parser: {e}")
+            last_err = e
+    raise last_err or RuntimeError("All Groq models failed in core parser")
 
 def _call_gemini(message, system_prompt):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent?key={GEMINI_API_KEY}"

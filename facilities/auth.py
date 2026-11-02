@@ -14,6 +14,8 @@ import logging
 from rapidfuzz import fuzz, process as fuzz_process
 
 from db import supabase
+from whatsapp.ux import clean_phone_number
+from elara.config import KANAV_PHONE, DEVELOPER_PHONE, KANAV_PHONES
 from facilities.config import BUILDING_TABS, BUILDING_ALIASES
 
 logger = logging.getLogger(__name__)
@@ -28,26 +30,105 @@ def resolve_facilities_user(whatsapp_number: str) -> dict | None:
                    permitted_buildings[], is_facilities_user (bool)
         None if the user doesn't exist at all
     """
+    clean_num = clean_phone_number(whatsapp_number)
+    if not clean_num:
+        return None
+
     try:
         from clients.config import TREAT_CHAITANYA_AS_TENANT_ONLY, is_chaitanya
-        if TREAT_CHAITANYA_AS_TENANT_ONLY and is_chaitanya(whatsapp_number):
+        if TREAT_CHAITANYA_AS_TENANT_ONLY and is_chaitanya(clean_num):
             return None
 
+        # ── Priority 1: Kanav (Director) Guarantee ──
+        if clean_num in KANAV_PHONES or clean_num == KANAV_PHONE:
+            try:
+                res = supabase.table("users").select(
+                    "id, name, role, department, whatsapp_number, permitted_buildings"
+                ).or_(f"whatsapp_number.eq.{clean_num},whatsapp_number.eq.+{clean_num},name.ilike.%Kanav%").execute()
+                if res and isinstance(res.data, list) and res.data and isinstance(res.data[0], dict):
+                    user = dict(res.data[0])
+                    user["role"] = "Director"
+                    user["department"] = "Facilities"
+                    user["whatsapp_number"] = clean_num
+                    user["permitted_buildings"] = BUILDING_TABS.copy()
+                    user["is_facilities_user"] = True
+                    return user
+            except Exception as e:
+                logger.warning(f"Kanav DB lookup error in resolve_facilities_user: {e}")
+
+            return {
+                "id": "kanav-director-uuid",
+                "name": "Kanav",
+                "role": "Director",
+                "department": "Facilities",
+                "whatsapp_number": clean_num,
+                "permitted_buildings": BUILDING_TABS.copy(),
+                "is_facilities_user": True,
+            }
+
+        # ── Priority 2: Developer Guarantee ──
+        if clean_num == DEVELOPER_PHONE:
+            try:
+                res = supabase.table("users").select(
+                    "id, name, role, department, whatsapp_number, permitted_buildings"
+                ).or_(f"whatsapp_number.eq.{clean_num},whatsapp_number.eq.+{clean_num},name.ilike.%Abhijeet%").execute()
+                if res and isinstance(res.data, list) and res.data and isinstance(res.data[0], dict):
+                    user = dict(res.data[0])
+                    user["role"] = "Developer"
+                    user["department"] = "Facilities"
+                    user["whatsapp_number"] = clean_num
+                    user["permitted_buildings"] = BUILDING_TABS.copy()
+                    user["is_facilities_user"] = True
+                    return user
+            except Exception as e:
+                logger.warning(f"Developer DB lookup error in resolve_facilities_user: {e}")
+
+            return {
+                "id": "developer-uuid",
+                "name": "Developer",
+                "role": "Developer",
+                "department": "Facilities",
+                "whatsapp_number": clean_num,
+                "permitted_buildings": BUILDING_TABS.copy(),
+                "is_facilities_user": True,
+            }
+
+        # ── Standard User Lookup ──
         res = supabase.table("users").select(
             "id, name, role, department, whatsapp_number, permitted_buildings"
-        ).eq("whatsapp_number", whatsapp_number).execute()
+        ).or_(f"whatsapp_number.eq.{clean_num},whatsapp_number.eq.+{clean_num}").execute()
+
+        # Fallback without country code prefix (e.g. 10 digits)
+        if (not res or not res.data) and len(clean_num) > 10 and clean_num.startswith("91"):
+            short_num = clean_num[2:]
+            res = supabase.table("users").select(
+                "id, name, role, department, whatsapp_number, permitted_buildings"
+            ).eq("whatsapp_number", short_num).execute()
 
         if not res or not isinstance(res.data, list) or not res.data or not isinstance(res.data[0], dict):
             return None
 
         user = dict(res.data[0])
-        role = user.get("role", "")
-        department = user.get("department", "")
-        user["is_facilities_user"] = (
-            role in ("Director", "Developer")
-            or (department == "Facilities" and bool(user.get("permitted_buildings")))
-            or bool(user.get("permitted_buildings"))
-        )
+        role_lower = (user.get("role") or "").strip().lower()
+        name_lower = (user.get("name") or "").strip().lower()
+        dept_lower = (user.get("department") or "").strip().lower()
+
+        if (
+            role_lower in ("director", "developer", "facility head", "facilities head")
+            or name_lower in ("anoop", "facility head", "facilities head", "kanav", "abhijeet")
+            or is_all_buildings_user(user)
+        ):
+            user["is_facilities_user"] = True
+            if not user.get("permitted_buildings"):
+                user["permitted_buildings"] = BUILDING_TABS.copy()
+        else:
+            user["is_facilities_user"] = (
+                dept_lower == "facilities"
+                or bool(user.get("permitted_buildings"))
+            )
+            if user["is_facilities_user"] and not user.get("permitted_buildings"):
+                user["permitted_buildings"] = BUILDING_TABS.copy()
+
         return user
 
     except Exception as e:
@@ -61,6 +142,9 @@ def is_all_buildings_user(user: dict) -> bool:
         return False
     role = (user.get("role") or "").strip().lower()
     name = (user.get("name") or "").strip().lower()
+    wa = clean_phone_number(user.get("whatsapp_number") or "")
+    if wa in KANAV_PHONES or wa in (KANAV_PHONE, DEVELOPER_PHONE):
+        return True
     if role in ("director", "developer", "facility head", "facilities head"):
         return True
     if name in ("anoop", "facility head", "facilities head", "kanav", "abhijeet"):
