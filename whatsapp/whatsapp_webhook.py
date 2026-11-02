@@ -338,8 +338,11 @@ def _deferred_startup():
 
 
 
-threading.Thread(target=_deferred_startup, daemon=True, name="deferred-startup").start()
-logging.info("Deferred startup scheduled (scheduler + session restore in ~10s)")
+if os.environ.get("TESTING") != "1":
+    threading.Thread(target=_deferred_startup, daemon=True, name="deferred-startup").start()
+    logging.info("Deferred startup scheduled (scheduler + session restore in ~10s)")
+else:
+    logging.info("Deferred startup skipped (TESTING mode active)")
 
 
 # ── Logging ──────────────────────────────────────────────────────────────────
@@ -807,6 +810,21 @@ def _handle_text(sender: str, text: str, voice_note: bool = False):
             return
         except Exception as clear_err:
             logger.error(f"Error clearing WhatsApp state in _handle_text for {sender}: {clear_err}")
+
+    # Check for admin manual sync command
+    if text.strip().lower() in ("sync clients", "refresh clients", "sync gsheet", "sync sheet"):
+        try:
+            from auth.middleware import authenticate_whatsapp_request
+            from clients.sync_engine import force_client_master_sync
+            u = authenticate_whatsapp_request(sender)
+            if u and (u.get("role") in ("Developer", "Director", "Employee") or u.get("department") == "Facilities"):
+                stats = force_client_master_sync()
+                valid = stats.get("valid_records", 0)
+                invalid = stats.get("invalid_records", 0)
+                send_text(sender, f"🔄 *Client Master Sync complete!*\n\n✅ Valid active clients: {valid}\n⚠️ Invalid rows: {invalid}\n\nClient records are fully up to date with Google Sheets MASTER tab.")
+                return
+        except Exception as sync_cmd_err:
+            logger.error(f"Error handling admin sync command: {sync_cmd_err}")
 
     # 0. Check for UNDO command (works from both text and voice)
     if text.strip().upper() == "UNDO" and not voice_note:

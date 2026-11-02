@@ -2,7 +2,7 @@ from __future__ import annotations
 import logging
 from db import supabase
 from clients.normalizer import normalize_mobile_number
-from clients.sync_engine import get_cached_clients
+from clients import sync_engine
 
 from clients.config import (
     TREAT_CHAITANYA_AS_TENANT_ONLY,
@@ -16,11 +16,30 @@ logger = logging.getLogger(__name__)
 _SELECTED_CLIENT_CONTEXT = {}  # type: dict[str, dict]
 
 
+def _filter_matching_clients(records: list, target_digits: str, target_last10: str) -> list:
+    """Helper to match active clients against target digits and last 10 digits."""
+    matches = []
+    for c in records:
+        if not c.get("is_active", True):
+            continue
+        c_mobile = "".join(ch for ch in str(c.get("mobile_number", "")) if ch.isdigit())
+        if c_mobile == target_digits or (target_last10 and len(c_mobile) >= 10 and c_mobile[-10:] == target_last10):
+            rec = dict(c)
+            # Map building code to standard display name
+            if rec.get("building") in ("GEBB2", "GEBB II", "GEBB-2"):
+                rec["building"] = "Business Bay-II"
+            elif rec.get("building") in ("GEBB1", "GEBB I", "GEBB-1"):
+                rec["building"] = "Business Bay-I"
+            matches.append(rec)
+    return matches
+
+
 def lookup_clients_by_phone(phone: str) -> list:
     """
     Looks up active client records by phone number.
     Normalizes the phone number first to ensure consistent matching.
-    Tries Supabase first; falls back to in-memory sync cache if table is absent.
+    Tries Supabase first if table is available; falls back to in-memory sync cache
+    with automatic on-demand refresh on cache miss.
     """
     clean_num = normalize_mobile_number(phone)
     if not clean_num:
@@ -34,27 +53,28 @@ def lookup_clients_by_phone(phone: str) -> list:
             return [dict(DEVELOPER_TENANT_RECORD)]
         return []
 
-    # 1. Query Supabase
-    try:
-        res = (
-            supabase.table("clients")
-            .select("*")
-            .eq("mobile_number", clean_num)
-            .eq("is_active", True)
-            .execute()
-        )
-        if res.data:
-            return res.data
-    except Exception as e:
-        logger.debug(f"Supabase client lookup error (using fallback): {e}")
+    # 1. Query Supabase (only if clients table is available in schema cache)
+    if sync_engine.is_supabase_clients_table_available():
+        try:
+            res = (
+                supabase.table("clients")
+                .select("*")
+                .eq("mobile_number", clean_num)
+                .eq("is_active", True)
+                .execute()
+            )
+            if res.data:
+                return res.data
+        except Exception as e:
+            sync_engine.mark_supabase_clients_table_unavailable()
+            logger.debug(f"Supabase client lookup error (using fallback): {e}")
 
-    # 2. Fallback to in-memory cache synced from authoritative client sheet
-    cached = get_cached_clients()
+    # 2. Check in-memory cache synced from authoritative client sheet
+    cached = sync_engine.get_cached_clients()
     if not cached:
         try:
-            from clients.sync_engine import run_client_master_sync
-            run_client_master_sync()
-            cached = get_cached_clients()
+            sync_engine.run_client_master_sync()
+            cached = sync_engine.get_cached_clients()
         except Exception as sync_err:
             logger.debug(f"Auto-sync on empty client cache failed: {sync_err}")
 
@@ -62,27 +82,27 @@ def lookup_clients_by_phone(phone: str) -> list:
     target_digits = "".join(ch for ch in str(clean_num) if ch.isdigit())
     target_last10 = target_digits[-10:] if len(target_digits) >= 10 else ""
 
-    matches = []
-    for c in cached:
-        if not c.get("is_active", True):
-            continue
-        c_mobile = "".join(ch for ch in str(c.get("mobile_number", "")) if ch.isdigit())
-        if c_mobile == target_digits or (target_last10 and len(c_mobile) >= 10 and c_mobile[-10:] == target_last10):
-            rec = dict(c)
-            # Map building code to standard display name
-            if rec.get("building") in ("GEBB2", "GEBB II", "GEBB-2"):
-                rec["building"] = "Business Bay-II"
-            elif rec.get("building") in ("GEBB1", "GEBB I", "GEBB-1"):
-                rec["building"] = "Business Bay-I"
-            matches.append(rec)
+    matches = _filter_matching_clients(cached, target_digits, target_last10)
+
+    # 3. On-demand cache refresh on miss (recognizes newly added clients in Google Sheet immediately)
+    if not matches:
+        refreshed = sync_engine.maybe_refresh_client_cache_on_miss()
+        if refreshed:
+            matches = _filter_matching_clients(refreshed, target_digits, target_last10)
+            if matches:
+                logger.info(
+                    f"Client {phone} recognized via on-demand Google Sheet refresh: "
+                    f"{matches[0].get('admin_name')} ({matches[0].get('company_name')})"
+                )
 
     if matches:
         return matches
 
-    # 3. Fallback safety net for Chaitanya if cache uninitialized
+    # 4. Fallback safety net for Chaitanya if cache uninitialized
     if TREAT_CHAITANYA_AS_TENANT_ONLY and (is_chaitanya(phone) or is_chaitanya(clean_num)):
         return [dict(CHAITANYA_TENANT_RECORD)]
 
+    logger.info(f"Unregistered client lookup for phone={phone} (canonical={clean_num}) — no match in {len(cached)} records")
     return []
 
 

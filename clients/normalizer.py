@@ -10,10 +10,12 @@ def normalize_mobile_number(phone: str) -> str:
     Normalizes any mobile number string into standard 12-digit format: 91XXXXXXXXXX
     Examples:
       '9876543210'       -> '919876543210'
-      '+91 9876543210'   -> '919876543210'
-      '91 9876543210'    -> '919876543210'
-      '+91-9876543210'   -> '919876543210'
-      '09876543210'      -> '919876543210'
+      '+91 82875 11886'  -> '918287511886'
+      '91 82875 11886'   -> '918287511886'
+      '+91-82875-11886'  -> '918287511886'
+      '08287511886'      -> '918287511886'
+      '00918287511886'   -> '918287511886'
+      '0918287511886'    -> '918287511886'
     """
     if not phone:
         return ""
@@ -23,6 +25,14 @@ def normalize_mobile_number(phone: str) -> str:
     digits = "".join(c for c in str(phone) if c.isdigit())
     if not digits:
         return ""
+
+    # International exit code prefix 0091 (e.g. 00918287511886 -> 14 digits)
+    if digits.startswith("0091") and len(digits) == 14:
+        digits = digits[2:]
+
+    # Leading 0 followed by 91 (e.g. 0918287511886 -> 13 digits)
+    if digits.startswith("091") and len(digits) == 13:
+        digits = digits[1:]
 
     # Leading 0 (e.g. 09876543210 -> 11 digits)
     if len(digits) == 11 and digits.startswith("0"):

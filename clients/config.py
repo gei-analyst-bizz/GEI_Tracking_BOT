@@ -199,7 +199,7 @@ NATURE_TO_SUB_NATURES = {
 }
 
 # ── Sync Configuration ──────────────────────────────────────────────────────
-CLIENT_SYNC_INTERVAL_MINUTES = int(os.getenv("CLIENT_SYNC_INTERVAL_MINUTES", "30"))
+CLIENT_SYNC_INTERVAL_MINUTES = int(os.getenv("CLIENT_SYNC_INTERVAL_MINUTES", "10"))
 
 def get_site_id_for_building(building: str) -> str:
     """Returns the Factech Site ID for a given building name/code.
