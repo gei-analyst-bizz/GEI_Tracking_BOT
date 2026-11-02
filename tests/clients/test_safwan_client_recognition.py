@@ -338,3 +338,30 @@ def test_safwan_active_client_context(monkeypatch, mock_supabase):
     assert ctx["company_name"] == "Good Earth Infra"
     assert ctx["building"] == "Business Bay-II"
     assert ctx["unit_number"] == "GEEBTWOTest"
+
+
+def test_get_client_by_id_with_cached_client(monkeypatch):
+    """Verifies that get_client_by_id resolves client by ID or sync_key without NameError."""
+    from clients.service import get_client_by_id
+    safwan_rec = {
+        "id": "safwan_id_123",
+        "mobile_number": "918287511886",
+        "company_name": "Good Earth Infra",
+        "building": "Business Bay-II",
+        "unit_number": "GEEBTWOTest",
+        "contact_name": "safwan",
+        "is_active": True,
+        "sync_key": "safwan_sync_key",
+    }
+    monkeypatch.setattr("clients.sync_engine.get_cached_clients", lambda: [safwan_rec])
+
+    # 1. Lookup by id
+    client_by_id = get_client_by_id("safwan_id_123")
+    assert client_by_id is not None
+    assert client_by_id["contact_name"] == "safwan"
+
+    # 2. Lookup by sync_key
+    client_by_key = get_client_by_id("safwan_sync_key")
+    assert client_by_key is not None
+    assert client_by_key["company_name"] == "Good Earth Infra"
+

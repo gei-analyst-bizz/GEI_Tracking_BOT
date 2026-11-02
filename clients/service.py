@@ -3,6 +3,7 @@ import logging
 from db import supabase
 from clients.normalizer import normalize_mobile_number
 from clients import sync_engine
+from clients.sync_engine import get_cached_clients
 
 from clients.config import (
     TREAT_CHAITANYA_AS_TENANT_ONLY,
@@ -112,15 +113,16 @@ def get_client_by_id(client_id: str, phone: str = "") -> dict | None:
     if not client_id:
         return None
 
-    try:
-        res = supabase.table("clients").select("*").eq("id", client_id).execute()
-        if res.data:
-            return res.data[0]
-    except Exception:
-        pass
+    if sync_engine.is_supabase_clients_table_available():
+        try:
+            res = supabase.table("clients").select("*").eq("id", client_id).execute()
+            if res.data:
+                return res.data[0]
+        except Exception:
+            pass
 
     # Fallback search by sync_key or ID in cache
-    for c in get_cached_clients():
+    for c in sync_engine.get_cached_clients():
         if c.get("id") == client_id or c.get("sync_key") == client_id:
             return c
 
