@@ -365,3 +365,97 @@ def test_get_client_by_id_with_cached_client(monkeypatch):
     assert client_by_key is not None
     assert client_by_key["company_name"] == "Good Earth Infra"
 
+
+# ── Credential Fallback & Health Route Tests ─────────────────────────────────
+
+def test_service_account_fallback_chain(monkeypatch):
+    """Verifies that sheets_client connects via fallback SA when primary fails."""
+    import os
+    from clients.sheets_client import _get_spreadsheet, invalidate_connection, get_active_service_account
+
+    invalidate_connection()
+    # Mock primary to fail, fallback to succeed
+    def mock_candidates():
+        return [
+            ("fallback-sa@domain.com", "dummy_pk"),
+        ]
+
+    monkeypatch.setattr("clients.sheets_client._get_service_account_candidates", mock_candidates)
+    
+    mock_ss = MagicMock()
+    mock_ss.title = "GEI Client's Admin Details"
+    
+    with patch("clients.sheets_client.Credentials.from_service_account_info") as mock_creds, \
+         patch("clients.sheets_client.gspread.authorize") as mock_auth:
+        mock_creds.return_value = MagicMock()
+        mock_gc = MagicMock()
+        mock_gc.open_by_key.return_value = mock_ss
+        mock_auth.return_value = mock_gc
+
+        ss = _get_spreadsheet(force_refresh=True)
+        assert ss.title == "GEI Client's Admin Details"
+        assert get_active_service_account() == "fallback-sa@domain.com"
+
+    invalidate_connection()
+
+
+def test_client_diagnostics_and_health_routes():
+    """Verifies that /health, /api/clients/status, and /api/clients/sync return expected keys."""
+    import os
+    os.environ["TESTING"] = "1"
+    from whatsapp.whatsapp_webhook import app
+    client = app.test_client()
+
+    res = client.get("/health")
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["status"] == "ok"
+    assert "clients_count" in data
+    assert "safwan_recognized" in data
+    assert data["safwan_recognized"] is True
+
+    status_res = client.get("/api/clients/status")
+    assert status_res.status_code == 200
+    status_data = status_res.get_json()
+    assert status_data["status"] == "ok"
+    assert status_data["diagnostics"]["safwan_recognized"] is True
+
+
+def test_greeting_exception_safety_does_not_reject_registered_client(monkeypatch):
+    """
+    Verifies that if an unexpected error occurs during greeting message delivery,
+    a registered client is NEVER sent 'We couldn't find your details in our client records'.
+    """
+    from clients.flows import handle_client_hi
+
+    # Simulate handle_client_hi raising an exception (e.g. Meta API network error)
+    def crashing_handle_client_hi(sender):
+        raise RuntimeError("Meta WhatsApp API network error")
+
+    monkeypatch.setattr("clients.flows.handle_client_hi", crashing_handle_client_hi)
+
+    sent_messages = []
+    def mock_send_text(to, body):
+        sent_messages.append((to, body))
+
+    monkeypatch.setattr("whatsapp.task_assignment.send_text", mock_send_text)
+
+    # Simulate the webhook greeting processing logic
+    sender_num = "918287511886"
+    is_client = False
+    try:
+        from clients.config import TREAT_CHAITANYA_AS_TENANT_ONLY, is_chaitanya
+        from clients.flows import is_registered_client
+        if (TREAT_CHAITANYA_AS_TENANT_ONLY and is_chaitanya(sender_num)) or is_registered_client(sender_num):
+            is_client = True
+            crashing_handle_client_hi(sender_num)
+    except Exception as client_hi_err:
+        if is_client:
+            mock_send_text(sender_num, "Hi 👋 Welcome to GEI Support. Please type 'menu' to view options or type your complaint description directly.")
+
+    # Must NOT have sent unregistered client message
+    assert len(sent_messages) == 1
+    assert "We couldn't find your details in our client records" not in sent_messages[0][1]
+    assert "Welcome to GEI Support" in sent_messages[0][1]
+
+

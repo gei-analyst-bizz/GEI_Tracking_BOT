@@ -360,11 +360,54 @@ VERIFY_TOKEN = os.getenv("VERIFY_TOKEN", "")
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint — used by keep-alive ping and Render health checks."""
-    return jsonify({
-        "status": "ok",
-        "service": "gei-whatsapp-bot",
-        "uptime": "alive",
-    }), 200
+    try:
+        from clients import sync_engine
+        diag = sync_engine.get_sync_diagnostics()
+        return jsonify({
+            "status": "ok",
+            "service": "gei-whatsapp-bot",
+            "uptime": "alive",
+            "clients_count": diag.get("cached_clients_count", 0),
+            "safwan_recognized": diag.get("safwan_recognized", False),
+            "active_sa": diag.get("active_service_account"),
+            "last_sync_iso": diag.get("last_sync_iso"),
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "ok",
+            "service": "gei-whatsapp-bot",
+            "uptime": "alive",
+            "diag_error": str(e),
+        }), 200
+
+
+@app.route('/api/clients/status', methods=['GET'])
+def api_clients_status():
+    """Public / admin status endpoint for Google Sheets client sync."""
+    try:
+        from clients import sync_engine
+        return jsonify({
+            "status": "ok",
+            "diagnostics": sync_engine.get_sync_diagnostics(),
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
+@app.route('/api/clients/sync', methods=['POST', 'GET'])
+def api_clients_sync():
+    """Forces an immediate client sync from the Google Sheet."""
+    try:
+        from clients import sync_engine
+        include_all = request.args.get("all_tabs", "false").lower() in ("true", "1", "yes")
+        stats = sync_engine.force_client_master_sync(include_all_tabs=include_all)
+        return jsonify({
+            "status": "ok",
+            "sync_stats": stats,
+            "diagnostics": sync_engine.get_sync_diagnostics(),
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 
 @app.route('/webhook', methods=['GET'])
@@ -487,14 +530,23 @@ def handle_whatsapp_message():
 
                                 if is_greeting:
                                     # 1. Check if sender is a registered Factech / tenant client (or Chaitanya)
+                                    is_client = False
                                     try:
                                         from clients.config import TREAT_CHAITANYA_AS_TENANT_ONLY, is_chaitanya
                                         from clients.flows import is_registered_client, handle_client_hi
                                         if (TREAT_CHAITANYA_AS_TENANT_ONLY and is_chaitanya(sender_num)) or is_registered_client(sender_num):
+                                            is_client = True
                                             handle_client_hi(sender_num)
                                             return
                                     except Exception as client_hi_err:
                                         logger.error(f"Client greeting error for {sender_num}: {client_hi_err}", exc_info=True)
+                                        if is_client:
+                                            try:
+                                                from whatsapp.task_assignment import send_text
+                                                send_text(sender_num, "Hi 👋 Welcome to GEI Support. Please type 'menu' to view options or type your complaint description directly.")
+                                            except Exception:
+                                                pass
+                                            return
 
                                     # 2. Check if sender is an internal employee / director / facilities / elara
                                     is_internal = (

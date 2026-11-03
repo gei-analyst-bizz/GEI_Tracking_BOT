@@ -8,8 +8,19 @@ load_dotenv()
 
 # ── Google Sheets Credentials ───────────────────────────────────────────────
 TENANTS_SHEET_ID = os.getenv("TENANTS_SHEET_ID", "1nU6iZoVxJexzU9ikl84IUi57W3rjLtXff_ZBq5qJwhk")
-TENANTS_SERVICE_ACCOUNT = os.getenv("TENANTS_SERVICE_ACCOUNT", "gei-clients-whatsapp-bot@gei-whatsapp-bot.iam.gserviceaccount.com")
-TENANTS_PRIVATE_KEY = os.getenv("TENANTS_PRIVATE_KEY", "")
+TENANTS_SERVICE_ACCOUNT = (
+    os.getenv("TENANTS_SERVICE_ACCOUNT")
+    or os.getenv("GOOGLE_SERVICE_ACCOUNT_EMAIL")
+    or os.getenv("FACILITIES_SERVICE_ACCOUNT_EMAIL")
+    or "gei-clients-whatsapp-bot@gei-whatsapp-bot.iam.gserviceaccount.com"
+)
+TENANTS_PRIVATE_KEY = (
+    os.getenv("TENANTS_PRIVATE_KEY")
+    or os.getenv("GOOGLE_PRIVATE_KEY")
+    or os.getenv("FACILITIES_PRIVATE_KEY")
+    or os.getenv("FACILITIES_SERVICE_ACCOUNT_PRIVATE_KEY")
+    or ""
+)
 TENANTS_MASTER_TAB = "MASTER"
 
 # ── Factech API Configuration ───────────────────────────────────────────────
@@ -199,7 +210,9 @@ NATURE_TO_SUB_NATURES = {
 }
 
 # ── Sync Configuration ──────────────────────────────────────────────────────
-CLIENT_SYNC_INTERVAL_MINUTES = int(os.getenv("CLIENT_SYNC_INTERVAL_MINUTES", "10"))
+CLIENT_SYNC_INTERVAL_MINUTES = int(os.getenv("CLIENT_SYNC_INTERVAL_MINUTES", "5"))
+CLIENT_CACHE_TTL_SECONDS = int(os.getenv("CLIENT_CACHE_TTL_SECONDS", "60"))
+SYNC_ON_MISS_COOLDOWN_SECONDS = float(os.getenv("SYNC_ON_MISS_COOLDOWN_SECONDS", "3.0"))
 
 def get_site_id_for_building(building: str) -> str:
     """Returns the Factech Site ID for a given building name/code.

@@ -6,23 +6,31 @@ import threading
 import time
 from datetime import datetime
 from db import supabase
-from clients.sheets_client import fetch_master_tenant_records
+from clients.sheets_client import (
+    fetch_master_tenant_records,
+    fetch_tenant_records_across_all_tabs,
+    get_active_service_account,
+)
 from clients.normalizer import normalize_client_row
+from clients.config import (
+    CLIENT_CACHE_TTL_SECONDS,
+    SYNC_ON_MISS_COOLDOWN_SECONDS,
+)
 
 logger = logging.getLogger(__name__)
 
 CACHE_FILE_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "clients_cache.json")
+SEED_FILE_PATH = os.path.join(os.path.dirname(__file__), "seed_clients.json")
 
-# In-memory fallback cache in case Supabase table is in transition or offline
+# In-memory authoritative cache
 _IN_MEMORY_CLIENTS_CACHE = []
 _LAST_SYNC_TIMESTAMP: float = 0.0
-_SYNC_LOCK = threading.Lock()
+_SYNC_LOCK = threading.RLock()
 
 # Circuit breaker for Supabase 'clients' table to avoid repeated slow timeouts
 _SUPABASE_CLIENTS_TABLE_AVAILABLE: bool = False
 _SUPABASE_LAST_CHECK: float = 0.0
 _SUPABASE_CHECK_COOLDOWN: float = 300.0  # 5 minutes
-SYNC_ON_MISS_COOLDOWN_SECONDS: float = 15.0  # Debounce on-demand sync on lookup miss
 
 
 def is_supabase_clients_table_available() -> bool:
@@ -51,6 +59,12 @@ def get_last_sync_timestamp() -> float:
     return _LAST_SYNC_TIMESTAMP
 
 
+def is_cache_stale() -> bool:
+    """Returns True if the cache has exceeded CLIENT_CACHE_TTL_SECONDS."""
+    global _LAST_SYNC_TIMESTAMP
+    return (time.time() - _LAST_SYNC_TIMESTAMP) > CLIENT_CACHE_TTL_SECONDS
+
+
 def _save_cache_to_disk(records: list):
     try:
         os.makedirs(os.path.dirname(CACHE_FILE_PATH), exist_ok=True)
@@ -61,34 +75,45 @@ def _save_cache_to_disk(records: list):
 
 
 def _load_cache_from_disk() -> list:
+    """Loads clients from local cache file, falling back to bundled seed file."""
     try:
         if os.path.exists(CACHE_FILE_PATH):
             with open(CACHE_FILE_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if isinstance(data, list):
+                if isinstance(data, list) and data:
                     return data
     except Exception as e:
         logger.warning(f"Failed to load client cache from disk: {e}")
+
+    try:
+        if os.path.exists(SEED_FILE_PATH):
+            with open(SEED_FILE_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list) and data:
+                    logger.info(f"Loaded {len(data)} clients from bundled seed file: {SEED_FILE_PATH}")
+                    return data
+    except Exception as e:
+        logger.warning(f"Failed to load client seed file: {e}")
+
     return []
 
 
-
-def run_client_master_sync() -> dict:
+def run_client_master_sync(include_all_tabs: bool = False) -> dict:
     """
-    Performs full synchronization from the Google Sheet MASTER tab into Supabase.
+    Performs full synchronization from the authoritative Google Sheet into memory.
+    If Supabase 'clients' table exists, upserts to Supabase as well.
 
     Steps:
-      1. Fetch all rows from MASTER tab.
+      1. Fetch all rows from Google Sheet (MASTER tab primary; checks other tabs if requested).
       2. Normalize fields, phone numbers, buildings, and compute deterministic sync_key.
-      3. Validate records and log invalid rows.
-      4. Upsert valid records into Supabase 'clients' table on_conflict='sync_key'.
-      5. Soft-deactivate (is_active=False) any previously active clients missing from sheet.
+      3. Validate records and skip invalid rows with clear logging.
+      4. Atomically update in-memory cache and persist to disk.
+      5. Upsert valid records into Supabase if table is present.
       6. Return sync summary.
     """
     global _IN_MEMORY_CLIENTS_CACHE, _LAST_SYNC_TIMESTAMP
     start_time = datetime.now()
-    _LAST_SYNC_TIMESTAMP = time.time()
-    logger.info("=== Starting Client Master Sync (MASTER Tab) ===")
+    logger.info("=== Starting Client Master Sync from Google Sheets ===")
 
     stats = {
         "total_rows_read": 0,
@@ -100,11 +125,15 @@ def run_client_master_sync() -> dict:
     }
 
     try:
-        raw_rows = fetch_master_tenant_records()
+        if include_all_tabs:
+            raw_rows = fetch_tenant_records_across_all_tabs()
+        else:
+            raw_rows = fetch_master_tenant_records()
         stats["total_rows_read"] = len(raw_rows)
     except Exception as e:
         logger.error(f"Failed to fetch tenant records from Google Sheets: {e}", exc_info=True)
         stats["errors"].append(f"Sheets fetch error: {str(e)}")
+        # Do not update _LAST_SYNC_TIMESTAMP on failure so retries can occur immediately
         return stats
 
     valid_records = []
@@ -112,11 +141,13 @@ def run_client_master_sync() -> dict:
 
     for row in raw_rows:
         row_num = row.get("_row_number", "?")
-        normalized, is_valid, validation_errors = normalize_client_row(row, source_sheet="MASTER")
+        source_tab = row.get("_source_sheet", "MASTER")
+        normalized, is_valid, validation_errors = normalize_client_row(row, source_sheet=source_tab)
 
         if is_valid:
-            valid_records.append(normalized)
-            seen_sync_keys.add(normalized["sync_key"])
+            if normalized["sync_key"] not in seen_sync_keys:
+                valid_records.append(normalized)
+                seen_sync_keys.add(normalized["sync_key"])
         else:
             stats["invalid_records"] += 1
             logger.warning(
@@ -126,26 +157,30 @@ def run_client_master_sync() -> dict:
 
     stats["valid_records"] = len(valid_records)
 
-    # Update in-memory fallback cache and persist to disk immediately
-    _IN_MEMORY_CLIENTS_CACHE = [dict(r) for r in valid_records]
-    _save_cache_to_disk(_IN_MEMORY_CLIENTS_CACHE)
+    # Atomically update in-memory cache and timestamp upon success
+    with _SYNC_LOCK:
+        _IN_MEMORY_CLIENTS_CACHE = [dict(r) for r in valid_records]
+        _LAST_SYNC_TIMESTAMP = time.time()
+        _save_cache_to_disk(_IN_MEMORY_CLIENTS_CACHE)
+
+    logger.info(
+        f"[SYNC] In-memory client cache updated with {len(_IN_MEMORY_CLIENTS_CACHE)} active client records."
+    )
 
     # Attempt Supabase Upsert (if table is available or re-check is due)
     if should_attempt_supabase_sync():
         try:
+            global _SUPABASE_LAST_CHECK, _SUPABASE_CLIENTS_TABLE_AVAILABLE
             _SUPABASE_LAST_CHECK = time.time()
-            # Check if table exists
             supabase.table("clients").select("id").limit(1).execute()
             _SUPABASE_CLIENTS_TABLE_AVAILABLE = True
 
-            # Batch upsert valid records
             batch_size = 50
             for i in range(0, len(valid_records), batch_size):
                 batch = valid_records[i : i + batch_size]
                 supabase.table("clients").upsert(batch, on_conflict="sync_key").execute()
                 stats["upserted"] += len(batch)
 
-            # Deactivate clients not present in the latest sync
             active_res = supabase.table("clients").select("id, sync_key").eq("is_active", True).execute()
             active_db_clients = active_res.data or []
 
@@ -173,12 +208,12 @@ def run_client_master_sync() -> dict:
                 mark_supabase_clients_table_unavailable()
                 logger.info(
                     "Supabase 'clients' table not present in schema cache. "
-                    f"In-memory sync cache will serve as authoritative store ({len(valid_records)} clients)."
+                    f"In-memory sync cache serves as authoritative store ({len(valid_records)} clients)."
                 )
             else:
                 logger.warning(
-                    f"Supabase 'clients' table update failed (may not be created yet): {db_err}. "
-                    f"In-memory fallback cache updated with {len(valid_records)} clients."
+                    f"Supabase 'clients' table update failed: {db_err}. "
+                    f"In-memory cache holds {len(valid_records)} clients."
                 )
             stats["errors"].append(f"Database upsert warning: {str(db_err)}")
     else:
@@ -189,39 +224,39 @@ def run_client_master_sync() -> dict:
     return stats
 
 
-def maybe_refresh_client_cache_on_miss() -> list:
+def maybe_refresh_client_cache_on_miss(force: bool = False, include_all_tabs: bool = False) -> list:
     """
-    On cache miss during client lookup, checks if Google Sheet has new rows.
-    Debounced by SYNC_ON_MISS_COOLDOWN_SECONDS to prevent API throttling.
+    On cache miss or stale cache, refreshes client cache from Google Sheets.
+    Debounced by SYNC_ON_MISS_COOLDOWN_SECONDS unless force=True.
     Returns the refreshed in-memory client list.
     """
     global _LAST_SYNC_TIMESTAMP
     now = time.time()
-    if (now - _LAST_SYNC_TIMESTAMP) < SYNC_ON_MISS_COOLDOWN_SECONDS:
+    if not force and (now - _LAST_SYNC_TIMESTAMP) < SYNC_ON_MISS_COOLDOWN_SECONDS:
         return get_cached_clients()
 
     with _SYNC_LOCK:
         now = time.time()
-        if (now - _LAST_SYNC_TIMESTAMP) < SYNC_ON_MISS_COOLDOWN_SECONDS:
+        if not force and (now - _LAST_SYNC_TIMESTAMP) < SYNC_ON_MISS_COOLDOWN_SECONDS:
             return get_cached_clients()
 
-        logger.info("[SYNC] Client lookup miss triggered on-demand sync from Google Sheet MASTER tab...")
+        logger.info("[SYNC] Refreshing client cache from authoritative Google Sheet...")
         try:
-            run_client_master_sync()
+            run_client_master_sync(include_all_tabs=include_all_tabs)
         except Exception as e:
-            logger.error(f"[SYNC] On-demand sync on cache miss failed: {e}", exc_info=True)
+            logger.error(f"[SYNC] On-demand sync failed: {e}", exc_info=True)
 
     return get_cached_clients()
 
 
-def force_client_master_sync() -> dict:
-    """Forces an immediate client sync from the Google Sheet, bypassing cooldown."""
+def force_client_master_sync(include_all_tabs: bool = True) -> dict:
+    """Forces an immediate client sync from Google Sheets, bypassing cooldown."""
     with _SYNC_LOCK:
-        return run_client_master_sync()
+        return run_client_master_sync(include_all_tabs=include_all_tabs)
 
 
 def get_cached_clients() -> list:
-    """Returns in-memory fallback clients list, loading from disk cache if uninitialized."""
+    """Returns in-memory fallback clients list, loading from disk/seed if uninitialized."""
     global _IN_MEMORY_CLIENTS_CACHE
     if not _IN_MEMORY_CLIENTS_CACHE:
         disk_cached = _load_cache_from_disk()
@@ -229,3 +264,21 @@ def get_cached_clients() -> list:
             _IN_MEMORY_CLIENTS_CACHE = disk_cached
     return _IN_MEMORY_CLIENTS_CACHE
 
+
+def get_sync_diagnostics() -> dict:
+    """Returns runtime diagnostic information about client sync state."""
+    cached = get_cached_clients()
+    safwan_found = any(
+        "".join(ch for ch in str(c.get("mobile_number", "")) if ch.isdigit()).endswith("8287511886")
+        for c in cached
+    )
+    last_sync = get_last_sync_timestamp()
+    return {
+        "cached_clients_count": len(cached),
+        "last_sync_timestamp": last_sync,
+        "last_sync_iso": datetime.fromtimestamp(last_sync).isoformat() if last_sync else None,
+        "cache_is_stale": is_cache_stale(),
+        "safwan_recognized": safwan_found,
+        "active_service_account": get_active_service_account(),
+        "supabase_clients_available": is_supabase_clients_table_available(),
+    }

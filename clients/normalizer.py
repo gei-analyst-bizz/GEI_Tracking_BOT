@@ -1,3 +1,4 @@
+from __future__ import annotations
 import re
 import hashlib
 import logging
@@ -5,24 +6,34 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def normalize_mobile_number(phone: str) -> str:
+def normalize_mobile_number(phone: str | int | None) -> str:
     """
     Normalizes any mobile number string into standard 12-digit format: 91XXXXXXXXXX
     Examples:
-      '9876543210'       -> '919876543210'
-      '+91 82875 11886'  -> '918287511886'
-      '91 82875 11886'   -> '918287511886'
-      '+91-82875-11886'  -> '918287511886'
-      '08287511886'      -> '918287511886'
-      '00918287511886'   -> '918287511886'
-      '0918287511886'    -> '918287511886'
+      '9876543210'        -> '919876543210'
+      '+91 82875 11886'   -> '918287511886'
+      '91 82875 11886'    -> '918287511886'
+      '+91-82875-11886'   -> '918287511886'
+      '08287511886'       -> '918287511886'
+      '00918287511886'    -> '918287511886'
+      '0918287511886'     -> '918287511886'
+      '+91 (828) 751-1886' -> '918287511886'
     """
-    if not phone:
+    if phone is None:
         return ""
-    
+
+    raw_str = str(phone).replace("\xa0", " ").strip()
+    if not raw_str:
+        return ""
+
+    # If comma or slash separated, take the first valid number
+    if "," in raw_str:
+        raw_str = raw_str.split(",")[0].strip()
+    elif "/" in raw_str:
+        raw_str = raw_str.split("/")[0].strip()
+
     # Strip all non-digit characters
-    # pyrefly: ignore [unnecessary-type-conversion]
-    digits = "".join(c for c in str(phone) if c.isdigit())
+    digits = "".join(c for c in raw_str if c.isdigit())
     if not digits:
         return ""
 
@@ -50,15 +61,14 @@ def normalize_mobile_number(phone: str) -> str:
     return digits
 
 
-def normalize_building(building_raw: str) -> str:
+def normalize_building(building_raw: str | None) -> str:
     """
     Normalizes various building name spellings to standard codes:
     GEBB1, GEBB2, GETT
     """
     if not building_raw:
         return ""
-    # pyrefly: ignore [unnecessary-type-conversion]
-    b = str(building_raw).strip().upper()
+    b = str(building_raw).replace("\xa0", " ").strip().upper()
     if (
         "GEBB II" in b
         or "GEBB-2" in b
@@ -98,34 +108,99 @@ def generate_sync_key(source_sheet: str, building: str, company: str, floor: str
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
+def _get_val(clean_dict: dict, *candidate_keys: str) -> str:
+    """Helper to extract value by searching candidate keys case-insensitively with stripped whitespace."""
+    # 1. Exact match
+    for k in candidate_keys:
+        if k in clean_dict and clean_dict[k]:
+            return str(clean_dict[k]).strip()
+
+    # 2. Case-insensitive / normalized match
+    norm_map = {
+        re.sub(r"[^\w\s]", "", str(k)).strip().lower(): str(v).strip()
+        for k, v in clean_dict.items()
+        if k
+    }
+    for k in candidate_keys:
+        clean_k = re.sub(r"[^\w\s]", "", k).strip().lower()
+        if clean_k in norm_map and norm_map[clean_k]:
+            return norm_map[clean_k]
+
+    return ""
+
+
 def normalize_client_row(row_dict: dict, source_sheet: str = "MASTER") -> tuple:
     """
-    Normalizes a row dictionary from the Google Sheet MASTER tab into a standardized
-    client record.
+    Normalizes a row dictionary from the Google Sheet into a standardized client record.
+    Supports flexible column names, whitespace differences, and format variations.
 
     Expected columns in MASTER:
-      - 'Tenant Company Name'
-      - 'Building Name'
+      - 'Tenant Company Name' / 'Company name'
+      - 'Building Name' / 'Building'
       - 'Floor'
-      - 'Unit Number'
-      - 'Admin Contact Name'
+      - 'Unit Number' / 'Unit No'
+      - 'Admin Contact Name' / 'Contact Name'
       - 'Designation'
-      - 'Primary Mobile Number'
-      - 'Primary Contact Email ID'
+      - 'Primary Mobile Number' / 'Admin Mobile Number' / 'Mobile Number'
+      - 'Primary Contact Email ID' / 'Email ID'
 
     Returns:
       (record_dict, is_valid, list_of_errors)
     """
-    clean_dict = {k.strip(): str(v).strip() for k, v in row_dict.items() if k}
+    clean_dict = {str(k).replace("\xa0", " ").strip(): str(v).replace("\xa0", " ").strip() for k, v in row_dict.items() if k}
 
-    company_name = clean_dict.get("Tenant Company Name") or clean_dict.get("Company name") or ""
-    building_raw = clean_dict.get("Building Name") or clean_dict.get("Building name") or ""
-    floor = clean_dict.get("Floor") or ""
-    unit_number = clean_dict.get("Unit Number") or clean_dict.get("Unit No") or ""
-    admin_name = clean_dict.get("Admin Contact Name") or ""
-    designation = clean_dict.get("Designation") or ""
-    mobile_raw = clean_dict.get("Primary Mobile Number") or clean_dict.get("Admin Mobile Number") or clean_dict.get("Mobile Number") or ""
-    email = clean_dict.get("Primary Contact Email ID") or clean_dict.get("Email ID") or clean_dict.get("Email") or ""
+    company_name = _get_val(
+        clean_dict,
+        "Tenant Company Name",
+        "Company Name",
+        "Company name",
+        "Tenant Name",
+        "Company",
+    )
+    building_raw = _get_val(
+        clean_dict,
+        "Building Name",
+        "Building name",
+        "Building",
+    )
+    floor = _get_val(clean_dict, "Floor")
+    unit_number = _get_val(
+        clean_dict,
+        "Unit Number",
+        "Unit No",
+        "Unit No.",
+        "Unit",
+    )
+    admin_name = _get_val(
+        clean_dict,
+        "Admin Contact Name",
+        "Contact Name",
+        "Admin Name",
+        "Name",
+    )
+    designation = _get_val(
+        clean_dict,
+        "Designation",
+        "Role",
+    )
+    mobile_raw = _get_val(
+        clean_dict,
+        "Primary Mobile Number",
+        "Admin Mobile Number",
+        "Mobile Number",
+        "Mobile",
+        "Phone Number",
+        "WhatsApp Number",
+        "Contact Number",
+        "Phone",
+    )
+    email = _get_val(
+        clean_dict,
+        "Primary Contact Email ID",
+        "Email ID",
+        "Email",
+        "Email Address",
+    )
 
     normalized_mobile = normalize_mobile_number(mobile_raw)
     normalized_bldg = normalize_building(building_raw)
