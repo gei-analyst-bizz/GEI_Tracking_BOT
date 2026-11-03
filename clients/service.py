@@ -18,20 +18,38 @@ _SELECTED_CLIENT_CONTEXT = {}  # type: dict[str, dict]
 
 
 def _filter_matching_clients(records: list, target_digits: str, target_last10: str) -> list:
-    """Helper to match active clients against target digits and last 10 digits."""
+    """Helper to match active clients against target digits and last 10 digits across all associated phone numbers."""
     matches = []
     for c in records:
         if not c.get("is_active", True):
             continue
-        c_mobile = "".join(ch for ch in str(c.get("mobile_number", "")) if ch.isdigit())
-        c_last10 = c_mobile[-10:] if len(c_mobile) >= 10 else c_mobile
 
-        if (
-            c_mobile == target_digits
-            or (target_last10 and c_last10 == target_last10)
-            or (target_digits and c_mobile.endswith(target_digits))
-            or (c_mobile and target_digits.endswith(c_mobile))
-        ):
+        # Collect all associated phone numbers for this client record
+        cand_numbers = []
+        if c.get("mobile_number"):
+            cand_numbers.append(str(c.get("mobile_number")))
+        for m in c.get("mobile_numbers") or []:
+            cand_numbers.append(str(m))
+        if c.get("secondary_mobile_number"):
+            cand_numbers.append(str(c.get("secondary_mobile_number")))
+        if c.get("alternate_mobile_number"):
+            cand_numbers.append(str(c.get("alternate_mobile_number")))
+
+        matched = False
+        for raw_num in cand_numbers:
+            c_mobile = "".join(ch for ch in str(raw_num) if ch.isdigit())
+            c_last10 = c_mobile[-10:] if len(c_mobile) >= 10 else c_mobile
+
+            if (
+                c_mobile == target_digits
+                or (target_last10 and c_last10 == target_last10)
+                or (target_digits and c_mobile.endswith(target_digits))
+                or (c_mobile and target_digits.endswith(c_mobile))
+            ):
+                matched = True
+                break
+
+        if matched:
             rec = dict(c)
             # Map building code to standard display name
             if rec.get("building") in ("GEBB2", "GEBB II", "GEBB-2"):
@@ -164,6 +182,7 @@ def get_client_by_id(client_id: str, phone: str = "") -> dict | None:
     if phone:
         clients = lookup_clients_by_phone(phone)
         for c in clients:
+            # pyrefly: ignore[unnecessary-type-conversion]
             if str(c.get("id")) == str(client_id) or c.get("sync_key") == client_id:
                 return c
 

@@ -61,6 +61,42 @@ def normalize_mobile_number(phone: str | int | None) -> str:
     return digits
 
 
+def extract_all_mobile_numbers(phone: str | int | None) -> list[str]:
+    """
+    Extracts and normalizes all valid mobile numbers from a raw string or cell value.
+    Supports delimiters such as commas, slashes, semicolons, ampersands, linebreaks, and 'and'.
+    Returns a deduplicated list of canonical phone numbers (e.g. ['918287511886', '918708868221']).
+    """
+    if phone is None:
+        return []
+
+    raw_str = str(phone).replace("\xa0", " ").strip()
+    if not raw_str:
+        return []
+
+    # Split by common delimiters: comma, slash, semicolon, pipe, ampersand, newline, or 'and'
+    tokens = re.split(r"[,/;&|\n]|(?:\band\b)", raw_str, flags=re.IGNORECASE)
+    results = []
+    seen = set()
+
+    for token in tokens:
+        token = token.strip()
+        if not token:
+            continue
+        norm = normalize_mobile_number(token)
+        if norm and len(norm) >= 10 and norm not in seen:
+            seen.add(norm)
+            results.append(norm)
+
+    # Fallback: if no tokens yielded numbers, try normalizing the whole string
+    if not results:
+        norm = normalize_mobile_number(raw_str)
+        if norm and len(norm) >= 10:
+            results.append(norm)
+
+    return results
+
+
 def normalize_building(building_raw: str | None) -> str:
     """
     Normalizes various building name spellings to standard codes:
@@ -194,6 +230,17 @@ def normalize_client_row(row_dict: dict, source_sheet: str = "MASTER") -> tuple:
         "Contact Number",
         "Phone",
     )
+    sec_mobile_raw = _get_val(
+        clean_dict,
+        "Secondary Mobile Number",
+        "Alternate Mobile Number",
+        "Alternate Mobile",
+        "Secondary Mobile",
+        "Mobile Number 2",
+        "Additional Mobile Number",
+        "Additional Mobile",
+        "Alternate WhatsApp Number",
+    )
     email = _get_val(
         clean_dict,
         "Primary Contact Email ID",
@@ -202,7 +249,19 @@ def normalize_client_row(row_dict: dict, source_sheet: str = "MASTER") -> tuple:
         "Email Address",
     )
 
-    normalized_mobile = normalize_mobile_number(mobile_raw)
+    # Extract all valid mobile numbers from primary and secondary fields
+    primary_numbers = extract_all_mobile_numbers(mobile_raw)
+    secondary_numbers = extract_all_mobile_numbers(sec_mobile_raw)
+
+    all_numbers = []
+    seen_nums = set()
+    for num in primary_numbers + secondary_numbers:
+        if num not in seen_nums:
+            seen_nums.add(num)
+            all_numbers.append(num)
+
+    normalized_mobile = all_numbers[0] if all_numbers else normalize_mobile_number(mobile_raw)
+    sec_mobile = all_numbers[1] if len(all_numbers) > 1 else ""
     normalized_bldg = normalize_building(building_raw)
 
     errors = []
@@ -223,6 +282,9 @@ def normalize_client_row(row_dict: dict, source_sheet: str = "MASTER") -> tuple:
         "admin_name": admin_name,
         "designation": designation,
         "mobile_number": normalized_mobile,
+        "mobile_numbers": all_numbers,
+        "secondary_mobile_number": sec_mobile,
+        "raw_mobile": mobile_raw,
         "email": email,
         "factech_client_id": None,
         "is_active": True,

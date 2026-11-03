@@ -459,3 +459,147 @@ def test_greeting_exception_safety_does_not_reject_registered_client(monkeypatch
     assert "Welcome to GEI Support" in sent_messages[0][1]
 
 
+# ── Dual Number Support Tests for Safwan ──────────────────────────────────────
+
+def test_extract_all_mobile_numbers_with_delimiters():
+    """
+    Verifies that extract_all_mobile_numbers parses comma, slash, semicolon,
+    ampersand, and 'and' separated mobile numbers accurately.
+    """
+    from clients.normalizer import extract_all_mobile_numbers
+
+    # Comma separated
+    nums = extract_all_mobile_numbers("8287511886, 8708868221")
+    assert nums == ["918287511886", "918708868221"]
+
+    # Slash separated with international prefix and formatting
+    nums = extract_all_mobile_numbers("+91 82875 11886 / +91 8708868221")
+    assert nums == ["918287511886", "918708868221"]
+
+    # Deduplication test
+    nums = extract_all_mobile_numbers("8287511886, +918287511886, 8708868221")
+    assert nums == ["918287511886", "918708868221"]
+
+
+def test_safwan_dual_number_sheet_row_normalization():
+    """
+    Verifies that a row containing both Safwan numbers in 'Primary Mobile Number'
+    or split across 'Primary' and 'Secondary' produces a single record with both numbers.
+    """
+    raw_sheet_row = {
+        "Tenant Company Name": "Good Earth Infra",
+        "Building Name": "GEBB II",
+        "Floor": "Ground Floor",
+        "Unit Number": "GEEBTWOTest",
+        "Admin Contact Name": "safwan",
+        " Designation": "Admin",
+        "Primary Mobile Number": "8287511886, 8708868221",
+        "Primary Contact Email ID": "",
+        "_row_number": 87,
+    }
+
+    record, is_valid, errors = normalize_client_row(raw_sheet_row, source_sheet="MASTER")
+    assert is_valid is True
+    assert errors == []
+    assert record["admin_name"] == "safwan"
+    assert record["company_name"] == "Good Earth Infra"
+    assert record["building"] == "GEBB2"
+    assert record["unit_number"] == "GEEBTWOTest"
+    assert record["mobile_number"] == "918287511886"
+    assert record["mobile_numbers"] == ["918287511886", "918708868221"]
+    assert record["secondary_mobile_number"] == "918708868221"
+
+
+def test_safwan_both_numbers_map_to_identical_client_profile(monkeypatch, mock_supabase):
+    """
+    Verifies that querying Safwan by either his primary number (8287511886)
+    or additional number (8708868221) returns the exact same client profile.
+    """
+    from clients import sync_engine
+    test_rec = {
+        "building": "GEBB2",
+        "company_name": "Good Earth Infra",
+        "floor": "Ground Floor",
+        "unit_number": "GEEBTWOTest",
+        "admin_name": "safwan",
+        "designation": "Admin",
+        "mobile_number": "918287511886",
+        "mobile_numbers": ["918287511886", "918708868221"],
+        "secondary_mobile_number": "918708868221",
+        "email": "",
+        "factech_client_id": None,
+        "is_active": True,
+        "source_sheet": "MASTER",
+        "sync_key": "safwan_sync_key_123",
+    }
+    monkeypatch.setattr(sync_engine, "_IN_MEMORY_CLIENTS_CACHE", [test_rec])
+
+    # Query using primary number variants
+    for p_num in ["+91 82875 11886", "918287511886", "8287511886"]:
+        matched = lookup_clients_by_phone(p_num)
+        assert len(matched) == 1, f"Failed for primary variant {p_num}"
+        assert matched[0]["sync_key"] == "safwan_sync_key_123"
+        assert matched[0]["company_name"] == "Good Earth Infra"
+        assert matched[0]["unit_number"] == "GEEBTWOTest"
+        assert matched[0]["building"] == "Business Bay-II"
+
+    # Query using additional number variants
+    for a_num in ["+91 8708868221", "+91 87088 68221", "918708868221", "8708868221"]:
+        matched = lookup_clients_by_phone(a_num)
+        assert len(matched) == 1, f"Failed for additional variant {a_num}"
+        assert matched[0]["sync_key"] == "safwan_sync_key_123"
+        assert matched[0]["company_name"] == "Good Earth Infra"
+        assert matched[0]["unit_number"] == "GEEBTWOTest"
+        assert matched[0]["building"] == "Business Bay-II"
+
+
+def test_safwan_both_numbers_receive_welcome_menu(monkeypatch, mock_supabase):
+    """
+    Verifies that when Safwan messages from either number, he receives the full
+    building- and unit-specific interactive welcome menu.
+    """
+    from clients import sync_engine
+    test_rec = {
+        "building": "GEBB2",
+        "company_name": "Good Earth Infra",
+        "floor": "Ground Floor",
+        "unit_number": "GEEBTWOTest",
+        "admin_name": "safwan",
+        "designation": "Admin",
+        "mobile_number": "918287511886",
+        "mobile_numbers": ["918287511886", "918708868221"],
+        "email": "",
+        "factech_client_id": None,
+        "is_active": True,
+        "source_sheet": "MASTER",
+        "sync_key": "safwan_sync_key_123",
+    }
+    monkeypatch.setattr(sync_engine, "_IN_MEMORY_CLIENTS_CACHE", [test_rec])
+
+    sent_menus = []
+    def mock_send_list(sender, body, btn_label, sections):
+        sent_menus.append({"sender": sender, "body": body, "sections": sections})
+        return True
+
+    monkeypatch.setattr("clients.flows.send_list_message", mock_send_list)
+
+    # 1. Message from additional number
+    handle_client_hi("918708868221")
+    assert len(sent_menus) == 1
+    assert sent_menus[0]["sender"] == "918708868221"
+    assert "Hi safwan" in sent_menus[0]["body"]
+    assert "Good Earth Infra" in sent_menus[0]["body"]
+    assert "Business Bay-II" in sent_menus[0]["body"]
+    assert "GEEBTWOTest" in sent_menus[0]["body"]
+
+    # 2. Message from primary number
+    handle_client_hi("918287511886")
+    assert len(sent_menus) == 2
+    assert sent_menus[1]["sender"] == "918287511886"
+    assert "Hi safwan" in sent_menus[1]["body"]
+    assert "Good Earth Infra" in sent_menus[1]["body"]
+    assert "Business Bay-II" in sent_menus[1]["body"]
+    assert "GEEBTWOTest" in sent_menus[1]["body"]
+
+
+

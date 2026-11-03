@@ -268,10 +268,17 @@ def get_cached_clients() -> list:
 def get_sync_diagnostics() -> dict:
     """Returns runtime diagnostic information about client sync state."""
     cached = get_cached_clients()
-    safwan_found = any(
+    safwan_primary = any(
         "".join(ch for ch in str(c.get("mobile_number", "")) if ch.isdigit()).endswith("8287511886")
+        or any("8287511886" in str(m) for m in c.get("mobile_numbers", []))
         for c in cached
     )
+    safwan_secondary = any(
+        "".join(ch for ch in str(c.get("mobile_number", "")) if ch.isdigit()).endswith("8708868221")
+        or any("8708868221" in str(m) for m in c.get("mobile_numbers", []))
+        for c in cached
+    )
+    safwan_found = safwan_primary or safwan_secondary
     last_sync = get_last_sync_timestamp()
     return {
         "cached_clients_count": len(cached),
@@ -279,6 +286,8 @@ def get_sync_diagnostics() -> dict:
         "last_sync_iso": datetime.fromtimestamp(last_sync).isoformat() if last_sync else None,
         "cache_is_stale": is_cache_stale(),
         "safwan_recognized": safwan_found,
+        "safwan_primary_active": safwan_primary,
+        "safwan_secondary_active": safwan_secondary,
         "active_service_account": get_active_service_account(),
         "supabase_clients_available": is_supabase_clients_table_available(),
     }

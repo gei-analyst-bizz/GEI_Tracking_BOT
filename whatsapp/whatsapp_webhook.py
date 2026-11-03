@@ -497,6 +497,7 @@ def handle_whatsapp_message():
                                         clear_state(sender_num)
                                         clear_context(sender_num)
                                         clear_elara_session(sender_num)
+                                        # pyrefly: ignore[unbound-name]
                                         send_text(sender_num, "Chat history and active feedback sessions have been cleared! 🧹")
                                         return
                                     except Exception as clear_err:
